@@ -1,0 +1,14 @@
+[Unit]
+Description=MSME 4.0 IoT Warehouse Security Master Controller Service
+After=network.target
+
+[Service]
+Type=simple
+User=algo2
+WorkingDirectory=/home/algo2/warehouse_controller
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
