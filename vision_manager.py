@@ -17,6 +17,7 @@ from config import (
 )
 from audio_manager import audio
 from door_controller import door
+from db_manager import db
 
 import numpy as np
 
@@ -283,6 +284,14 @@ class VisionManager:
 
         # 2. Trigger Door Closing sequence
         door.close_door_async()
+
+        # 3. Log Critical Security Alert to Supabase
+        db.log_security_alert("UNAUTHORIZED_FACE", "CRITICAL", {
+            "snapshot_file": img_filename,
+            "detected_at": now_str,
+            "camera": "Camera 0 (AI Gate)",
+            "door_action": "CLOSING_SEQUENCE_INITIATED"
+        })
 
     def generate_mjpeg_stream(self, camera_index: int):
         """Yields multipart MJPEG stream for Flask streaming endpoint."""

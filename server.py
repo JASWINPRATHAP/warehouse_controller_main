@@ -15,6 +15,7 @@ from door_controller import door
 from rfid_manager import rfid
 from audio_manager import audio
 from event_logger import logger
+from db_manager import db
 
 app = Flask(__name__)
 
@@ -89,8 +90,13 @@ def api_status():
             "status": audio.last_audio_status
         },
         "rfid": {
-            "port": rfid.port,
+            "checkin_port": rfid.checkin_port,
+            "checkout_port": rfid.checkout_port,
             "active_items_count": len(rfid.active_inventory)
+        },
+        "database": {
+            "sync_status": db.last_sync_status,
+            "last_sync": db.last_sync_time
         }
     })
 

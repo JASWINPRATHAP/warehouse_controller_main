@@ -11,6 +11,7 @@ from config import (
     HUMIDITY_LOW_THRESHOLD, SENSOR_OFFLINE_TIMEOUT_SEC, AUDIO_MAP
 )
 from audio_manager import audio
+from db_manager import db
 
 class SensorEvaluator:
     def __init__(self):
@@ -58,6 +59,9 @@ class SensorEvaluator:
         tag_missing = bool(payload.get("tag_missing", False))
         goods_missing = bool(payload.get("goods_missing", False))
 
+        # Log sensor reading into Supabase
+        db.log_sensor_telemetry(payload)
+
         # Helper to check for rising edge or persistent alert
         def check_alert(state_key: str, is_active: bool, audio_num: int, event_name: str):
             prev = self._prev_active_states.get(state_key, False)
@@ -66,6 +70,13 @@ class SensorEvaluator:
                     # Rising edge: New alarm condition!
                     print(f"🚨 [SENSOR ALERT] {event_name}! Triggering Audio #{audio_num}")
                     audio.play(audio_num, force=True)
+                    # Log alert to Supabase
+                    db.log_security_alert(event_name, "CRITICAL" if "FLAME" in event_name or "GAS" in event_name else "WARNING", {
+                        "sensor": state_key,
+                        "value": payload.get(state_key),
+                        "temperature": temp,
+                        "humidity": humidity
+                    })
                 else:
                     # Continuous condition: Play with cooldown
                     audio.play(audio_num, force=False)

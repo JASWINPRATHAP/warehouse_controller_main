@@ -74,23 +74,87 @@ KNOWN_FACES_DIR = os.path.join(os.path.dirname(__file__), "known_faces")
 UNKNOWN_FACES_DIR = os.path.join(os.path.dirname(__file__), "unknown_faces")
 
 # ==========================================
-# 🏷️ UHF RFID READER & WAREHOUSE TIME RULES
+# 🏷️ DUAL UHF RFID READERS (SRK-UDR6 Protocol)
 # ==========================================
-RFID_DEVICE = "/dev/ttyUSB0"   # Default USB-to-RS232 adapter
+RFID_CHECKIN_PORT = os.environ.get("RFID_CHECKIN_PORT", "/dev/ttyUSB0")   # Check-In Gate
+RFID_CHECKOUT_PORT = os.environ.get("RFID_CHECKOUT_PORT", "/dev/ttyUSB1") # Check-Out Gate
 RFID_BAUDRATE = 115200
-RFID_ADDRESS = 0x00
-RFID_INVENTORY_OPCODE = 0x01
-RFID_INFO_OPCODE = 0x21
-RFID_CRC_POLY = 0x8408
-RFID_CRC_INIT = 0xFFFF
-RFID_SCAN_TIME_MS = 200        # Fast 200ms sweep
-RFID_POLL_INTERVAL_SEC = 0.05
+RFID_HEADER = bytes([0x52, 0x46]) # 52 46 frame header
+RFID_FRAME_MIN_LEN = 15
+RFID_EPC_OFFSET = 12
+RFID_EPC_LENGTH = 12 # 12 bytes = 24 hex characters
+RFID_DEBOUNCE_SEC = 2.0 # Minimum seconds between scans of the same tag at the same gate
 
-# 📦 Warehouse Movement & State Rules:
-# - If tag is scanned for the first time -> Status = "ENTERED" (Check-In)
-# - Scans within MIN_DWELL_TIME_SEC are debounced (same pass event)
-# - If tag is scanned again after MIN_DWELL_TIME_SEC -> Status = "LEAVING" (Check-Out)
-RFID_MIN_DWELL_TIME_SEC = 10.0      # Minimum seconds before a tag can be marked as 'Leaving'
-RFID_TAG_EXPIRY_HOURS = 24.0        # Auto-archive tags from active warehouse memory after 24h
+# 📦 Warehouse Predefined Tag Catalog (Hex EPC -> Product Details)
+PREDEFINED_TAG_CATALOG = {
+    "E28011700000020A12345601": {
+        "product_name": "Industrial Gearbox Pallet",
+        "category": "Machinery",
+        "unit_weight_kg": 25.5,
+        "target_zone": "Zone-A",
+        "mfg_date": "2026-01-10",
+        "exp_date": "2030-01-10",
+        "batch_no": "GB-BATCH-01"
+    },
+    "E28011700000020A12345602": {
+        "product_name": "Precision Roller Bearings Box",
+        "category": "Hardware",
+        "unit_weight_kg": 12.0,
+        "target_zone": "Zone-B",
+        "mfg_date": "2026-02-15",
+        "exp_date": "2029-02-15",
+        "batch_no": "RB-BATCH-02"
+    },
+    "E28011700000020A12345603": {
+        "product_name": "Heavy Duty Copper Wire Coil",
+        "category": "Electrical",
+        "unit_weight_kg": 18.2,
+        "target_zone": "Zone-C",
+        "mfg_date": "2026-03-01",
+        "exp_date": "2031-03-01",
+        "batch_no": "CW-BATCH-03"
+    },
+    "E28011700000020A12345604": {
+        "product_name": "Microcontroller Circuit Boards",
+        "category": "Electronics",
+        "unit_weight_kg": 6.4,
+        "target_zone": "Zone-D",
+        "mfg_date": "2026-04-12",
+        "exp_date": "2028-04-12",
+        "batch_no": "MC-BATCH-04"
+    }
+}
+
+def get_tag_metadata(epc: str) -> dict:
+    """Returns predefined metadata for an EPC, or a structured default."""
+    epc_clean = epc.strip().upper()
+    if epc_clean in PREDEFINED_TAG_CATALOG:
+        data = dict(PREDEFINED_TAG_CATALOG[epc_clean])
+        data["epc"] = epc_clean
+        return data
+    # Fallback for dynamic/new tag
+    short_id = epc_clean[-8:] if len(epc_clean) >= 8 else epc_clean
+    return {
+        "epc": epc_clean,
+        "product_name": f"Material Pallet #{short_id}",
+        "category": "General Stock",
+        "unit_weight_kg": 10.0,
+        "target_zone": "Zone-A",
+        "mfg_date": "2026-01-01",
+        "exp_date": "2029-01-01",
+        "batch_no": f"BATCH-{short_id}"
+    }
+
+# ==========================================
+# ☁️ SUPABASE CLOUD DATABASE CONFIGURATION
+# ==========================================
+SUPABASE_HOST = os.environ.get("SUPABASE_HOST", "aws-0-ap-south-1.pooler.supabase.com")
+SUPABASE_PORT = int(os.environ.get("SUPABASE_PORT", 5432))
+SUPABASE_DB = os.environ.get("SUPABASE_DB", "postgres")
+SUPABASE_USER = os.environ.get("SUPABASE_USER", "postgres.faptrwqvcnozbajbihih")
+SUPABASE_PASSWORD = os.environ.get("SUPABASE_PASSWORD", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://faptrwqvcnozbajbihih.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
 RFID_INVENTORY_DB_FILE = os.path.join(os.path.dirname(__file__), "warehouse_inventory.json")
 EVENTS_LOG_FILE = os.path.join(os.path.dirname(__file__), "events.jsonl")

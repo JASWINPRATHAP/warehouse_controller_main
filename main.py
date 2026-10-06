@@ -14,6 +14,7 @@ from config import PI_IP, FLASK_PORT
 from rfid_manager import rfid
 from vision_manager import vision
 from door_controller import door
+from db_manager import db
 from server import run_server
 
 def shutdown_handler(signum, frame):
@@ -36,20 +37,25 @@ def main():
     print("=" * 70)
     print(f" Master Controller IP : {PI_IP}")
     print(f" HTTP Endpoint Port   : {FLASK_PORT}")
-    print(f" RFID Port Target     : {rfid.port}")
+    print(f" Check-In RFID Port   : {rfid.checkin_port}")
+    print(f" Check-Out RFID Port  : {rfid.checkout_port}")
     print("=" * 70)
 
-    # 1. Start UHF RFID Reader Background Worker
-    print("\n[1/3] Initializing UHF RFID Reader Subsystem...")
+    # 1. Start Supabase Cloud DB Persistence Worker
+    print("\n[1/4] Starting Supabase Cloud Sync Engine...")
+    db.start()
+
+    # 2. Start Dual UHF RFID Readers (Gate 1 Check-In & Gate 2 Check-Out)
+    print("\n[2/4] Initializing Dual UHF RFID Readers (Check-In & Check-Out)...")
     rfid.connect()
     rfid.start_background_scanning()
 
-    # 2. Start Vision & Background AI Face Recognition Worker
-    print("\n[2/3] Initializing Dual Camera & AI Face Recognition Subsystem...")
+    # 3. Start Dual Camera & AI Face Recognition Subsystem
+    print("\n[3/4] Initializing Dual Camera & AI Face Recognition Subsystem...")
     vision.start()
 
-    # 3. Start Flask Web Server & Dashboard
-    print(f"\n[3/3] Starting Central Flask Server on http://0.0.0.0:{FLASK_PORT}...")
+    # 4. Start Flask Web Server
+    print(f"\n[4/4] Starting Central Flask Server on http://0.0.0.0:{FLASK_PORT}...")
     print(f"  -> ESP32 Sensor Endpoint : http://{PI_IP}:{FLASK_PORT}/sensor")
     print(f"  -> Camera 0 AI Stream    : http://{PI_IP}:{FLASK_PORT}/video0")
     print(f"  -> Camera 1 Live Stream  : http://{PI_IP}:{FLASK_PORT}/video1")
