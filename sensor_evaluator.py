@@ -51,10 +51,15 @@ class SensorEvaluator:
         temp = float(payload.get("temperature", 25.0))
         humidity = float(payload.get("humidity", 50.0))
 
-        temp_high = (temp > TEMP_HIGH_THRESHOLD)
-        temp_low = (temp < TEMP_LOW_THRESHOLD)
-        humidity_high = (humidity > HUMIDITY_HIGH_THRESHOLD)
-        humidity_low = (humidity < HUMIDITY_LOW_THRESHOLD)
+        # Only evaluate temperature if reading is present and positive
+        temp_val = payload.get("temperature")
+        temp_high = (temp_val is not None and float(temp_val) > TEMP_HIGH_THRESHOLD)
+        temp_low = (temp_val is not None and 0.0 < float(temp_val) < TEMP_LOW_THRESHOLD)
+
+        hum_val = payload.get("humidity")
+        humidity_high = (hum_val is not None and float(hum_val) > HUMIDITY_HIGH_THRESHOLD)
+        humidity_low = (hum_val is not None and 0.0 < float(hum_val) < HUMIDITY_LOW_THRESHOLD)
+
         product_missing = bool(payload.get("product_missing", False))
         tag_missing = bool(payload.get("tag_missing", False))
         goods_missing = bool(payload.get("goods_missing", False))
@@ -62,24 +67,22 @@ class SensorEvaluator:
         # Log sensor reading into Supabase
         db.log_sensor_telemetry(payload)
 
-        # Helper to check for rising edge or persistent alert
+        # Helper to check for rising edge: ONLY trigger audio ONCE when alarm starts
         def check_alert(state_key: str, is_active: bool, audio_num: int, event_name: str):
             prev = self._prev_active_states.get(state_key, False)
             if is_active:
                 if not prev:
-                    # Rising edge: New alarm condition!
+                    # Rising edge: Brand new alarm condition!
                     print(f"🚨 [SENSOR ALERT] {event_name}! Triggering Audio #{audio_num}")
                     audio.play(audio_num, force=True)
                     # Log alert to Supabase
                     db.log_security_alert(event_name, "CRITICAL" if "FLAME" in event_name or "GAS" in event_name else "WARNING", {
                         "sensor": state_key,
                         "value": payload.get(state_key),
-                        "temperature": temp,
-                        "humidity": humidity
+                        "temperature": temp_val,
+                        "humidity": hum_val
                     })
-                else:
-                    # Continuous condition: Play with cooldown
-                    audio.play(audio_num, force=False)
+                # DO NOT continuously re-trigger audio while alarm is already active (prevents audio spam!)
                 triggered_events.append(event_name)
             self._prev_active_states[state_key] = is_active
 

@@ -49,6 +49,8 @@ def main():
     print("\n[2/4] Initializing Dual UHF RFID Readers (Check-In & Check-Out)...")
     rfid.connect()
     rfid.start_background_scanning()
+    print(f"  -> IN GATE (Check-In)   : {rfid.checkin_port or 'Standby (Plug in reader)'}")
+    print(f"  -> EXIT GATE (Check-Out): {rfid.checkout_port or 'Standby (Plug in reader)'}")
 
     # 3. Start Dual Camera & AI Face Recognition Subsystem
     print("\n[3/4] Initializing Dual Camera & AI Face Recognition Subsystem...")
@@ -56,9 +58,12 @@ def main():
 
     # 4. Start Flask Web Server
     print(f"\n[4/4] Starting Central Flask Server on http://0.0.0.0:{FLASK_PORT}...")
+    print(f"  -> Detected Edge IP      : {PI_IP}")
     print(f"  -> ESP32 Sensor Endpoint : http://{PI_IP}:{FLASK_PORT}/sensor")
     print(f"  -> Camera 0 AI Stream    : http://{PI_IP}:{FLASK_PORT}/video0")
     print(f"  -> Camera 1 Live Stream  : http://{PI_IP}:{FLASK_PORT}/video1")
+    print(f"  -> DB Test Endpoint      : http://{PI_IP}:{FLASK_PORT}/api/db/test")
+    print(f"  -> Web Incident Dispatch : http://{PI_IP}:{FLASK_PORT}/api/trigger-incident")
     print(f"  -> Headless API Endpoint : http://{PI_IP}:{FLASK_PORT}/")
     print("\n[SYSTEM READY] Listening for sensor telemetry, RFID tags, and video feeds.\n")
 

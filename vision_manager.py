@@ -99,8 +99,47 @@ class VisionManager:
 
         print(f"[VISION] Total authorized people loaded: {len(self.known_face_names)}")
 
+    @staticmethod
+    def _find_opencv_capture_devices() -> list:
+        """Scans for real video capture devices on Linux/Windows, filtering out hardware codec nodes."""
+        valid_devices = []
+
+        # 1. On Linux, check /dev/v4l/by-id/ symlinks first (guaranteed USB webcams)
+        if sys.platform.startswith("linux") and os.path.exists("/dev/v4l/by-id"):
+            try:
+                import glob
+                for path in sorted(glob.glob("/dev/v4l/by-id/*")):
+                    try:
+                        cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+                        if cap.isOpened():
+                            ret, frame = cap.read()
+                            if ret and frame is not None and frame.size > 0:
+                                valid_devices.append(path)
+                            cap.release()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # 2. Check numeric indices with CAP_V4L2 on Linux or default backend on Windows
+        candidates = [0, 2, 4, 10, 11, 12, 14, 16, 1, 3]
+        for idx in candidates:
+            if idx in valid_devices:
+                continue
+            try:
+                cap = cv2.VideoCapture(idx, cv2.CAP_V4L2) if sys.platform.startswith("linux") else cv2.VideoCapture(idx)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    if ret and frame is not None and frame.size > 0:
+                        valid_devices.append(idx)
+                    cap.release()
+            except Exception:
+                continue
+
+        return valid_devices
+
     def _init_cameras(self):
-        """Initializes Picamera2 instances or OpenCV USB video capture devices."""
+        """Initializes Picamera2 CSI instances or scans for active USB webcams."""
         # Camera 0 Init (AI Recognition Cam)
         if PICAMERA2_AVAILABLE:
             try:
@@ -110,24 +149,9 @@ class VisionManager:
                 ))
                 self.cam0.start()
                 self.cam0_backend = "picamera2"
-                print("[VISION] Camera 0 (Picamera2 CSI) initialized for AI recognition.")
+                print("✅ [VISION] Camera 0 (Picamera2 CSI) initialized for AI recognition.")
             except Exception as e:
-                print(f"[VISION INFO] Picamera2(0) unavailable ({e}). Trying OpenCV VideoCapture(0)...")
                 self.cam0 = None
-
-        if self.cam0 is None:
-            try:
-                cap0 = cv2.VideoCapture(0)
-                if cap0.isOpened():
-                    cap0.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-                    cap0.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-                    self.cam0 = cap0
-                    self.cam0_backend = "cv2"
-                    print("[VISION] Camera 0 (OpenCV USB V4L2) initialized for AI recognition.")
-                else:
-                    print("[VISION WARN] No camera device found for Camera 0.")
-            except Exception as e:
-                print(f"[VISION WARN] OpenCV Camera 0 failed: {e}")
 
         # Camera 1 Init (Live Surveillance Feed Cam)
         if PICAMERA2_AVAILABLE:
@@ -138,24 +162,45 @@ class VisionManager:
                 ))
                 self.cam1.start()
                 self.cam1_backend = "picamera2"
-                print("[VISION] Camera 1 (Picamera2 CSI) initialized for Live stream.")
+                print("✅ [VISION] Camera 1 (Picamera2 CSI) initialized for Live stream.")
             except Exception:
                 self.cam1 = None
 
+        # If CSI cameras not active, scan for USB capture devices
+        if self.cam0 is None or self.cam1 is None:
+            active_usb_indices = self._find_opencv_capture_devices()
+            print(f"[VISION] Active USB Camera Indices Discovered: {active_usb_indices}")
+
+            if self.cam0 is None and len(active_usb_indices) > 0:
+                idx0 = active_usb_indices.pop(0)
+                try:
+                    cap0 = cv2.VideoCapture(idx0)
+                    if cap0.isOpened():
+                        cap0.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+                        cap0.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                        self.cam0 = cap0
+                        self.cam0_backend = "cv2"
+                        print(f"✅ [VISION] Camera 0 (USB Webcam index {idx0}) initialized for AI.")
+                except Exception as e:
+                    print(f"[VISION WARN] Failed to open USB Camera 0: {e}")
+
+            if self.cam1 is None and len(active_usb_indices) > 0:
+                idx1 = active_usb_indices.pop(0)
+                try:
+                    cap1 = cv2.VideoCapture(idx1)
+                    if cap1.isOpened():
+                        cap1.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+                        cap1.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                        self.cam1 = cap1
+                        self.cam1_backend = "cv2"
+                        print(f"✅ [VISION] Camera 1 (USB Webcam index {idx1}) initialized for Live stream.")
+                except Exception as e:
+                    print(f"[VISION WARN] Failed to open USB Camera 1: {e}")
+
+        if self.cam0 is None:
+            print("[VISION INFO] Camera 0 running in HUD standby mode.")
         if self.cam1 is None:
-            try:
-                cam1_idx = 1 if self.cam0_backend == "cv2" else 0
-                cap1 = cv2.VideoCapture(cam1_idx)
-                if cap1.isOpened():
-                    cap1.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-                    cap1.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-                    self.cam1 = cap1
-                    self.cam1_backend = "cv2"
-                    print(f"[VISION] Camera 1 (OpenCV USB dev {cam1_idx}) initialized for Live stream.")
-                else:
-                    print("[VISION INFO] Camera 1 standby placeholder active.")
-            except Exception as e:
-                print(f"[VISION INFO] Camera 1 fallback unavailable: {e}")
+            print("[VISION INFO] Camera 1 running in HUD standby mode.")
 
     def start(self):
         """Starts background AI face recognition thread."""
@@ -364,8 +409,11 @@ class VisionManager:
                     time.sleep(0.05)
                     continue
 
+                raw_bytes = jpeg.tobytes()
                 yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                       b'Content-Type: image/jpeg\r\n'
+                       b'Content-Length: ' + str(len(raw_bytes)).encode() + b'\r\n\r\n' +
+                       raw_bytes + b'\r\n')
                 time.sleep(0.04)
             except Exception as e:
                 # Fallback to standby on unexpected frame capture error so stream never breaks
@@ -373,8 +421,11 @@ class VisionManager:
                     fallback = self._generate_standby_frame(f"Camera {camera_index} Stream")
                     ret, jpeg = cv2.imencode('.jpg', fallback, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                     if ret:
+                        raw_bytes = jpeg.tobytes()
                         yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                               b'Content-Type: image/jpeg\r\n'
+                               b'Content-Length: ' + str(len(raw_bytes)).encode() + b'\r\n\r\n' +
+                               raw_bytes + b'\r\n')
                 except Exception:
                     pass
                 time.sleep(0.1)

@@ -41,9 +41,36 @@ class DatabaseManager:
         if self._running:
             return
         self._running = True
+        self.verify_connection()
         self._worker_thread = threading.Thread(target=self._sync_loop, daemon=True)
         self._worker_thread.start()
         print("[DB] Supabase async persistence worker started.")
+
+    def verify_connection(self) -> dict:
+        """Explicitly tests connection to Supabase PostgreSQL and logs status."""
+        conn = self._get_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+                self.last_sync_status = "connected"
+                print("\n========================================================")
+                print(f" ✅ [DATABASE ONLINE] Connected to Supabase PostgreSQL!")
+                print(f" Host: {SUPABASE_HOST}:{SUPABASE_PORT} | DB: {SUPABASE_DB}")
+                print("========================================================\n")
+                return {"connected": True, "host": SUPABASE_HOST, "status": "ONLINE"}
+            except Exception as e:
+                self.last_sync_status = f"query_err: {e}"
+        
+        print("\n========================================================")
+        print(" ⚠️ [DATABASE OFFLINE] Supabase PostgreSQL not connected.")
+        if not SUPABASE_PASSWORD:
+            print(" -> Reason: SUPABASE_PASSWORD is empty. Run 'export SUPABASE_PASSWORD=...'")
+        else:
+            print(f" -> Reason: {self.last_sync_status}")
+        print(" -> Action: Local resilient queue active. No data will be lost.")
+        print("========================================================\n")
+        return {"connected": False, "host": SUPABASE_HOST, "status": self.last_sync_status}
 
     def _get_connection(self):
         """Attempts to obtain or recreate a PostgreSQL connection to Supabase."""

@@ -78,49 +78,84 @@ class DualRFIDManager:
 
     @staticmethod
     def get_available_com_ports() -> List[str]:
-        """Automatically detects plugged-in serial COM ports on the system."""
+        """Automatically detects plugged-in USB serial COM ports, strictly ignoring onboard UARTs."""
         ports = serial.tools.list_ports.comports()
         detected = []
         for p in ports:
             dev = p.device
-            # Filter out known non-hardware ports if needed
-            detected.append(dev)
-        return sorted(detected)
+            desc = (p.description or "").lower()
+            hwid = (p.hwid or "").lower()
+
+            # Ignore onboard Linux serial pins and bluetooth (/dev/ttyAMA*, /dev/ttyS*)
+            if "ttyama" in dev.lower() or "ttys" in dev.lower() or "rfcomm" in dev.lower():
+                continue
+
+            # Accept genuine USB adapters: /dev/ttyUSB*, /dev/ttyACM*, or USB in description/hwid
+            if dev.startswith("/dev/ttyUSB") or dev.startswith("/dev/ttyACM"):
+                detected.append(dev)
+            elif "usb" in desc or "usb" in hwid or "vid" in hwid or dev.upper().startswith("COM"):
+                if dev.upper() != "COM1": # Exclude motherboard legacy COM1 on Windows
+                    detected.append(dev)
+        return sorted(list(set(detected)))
 
     def connect(self):
-        """Discovers serial ports and connects Reader 1 (Entry Gate) and Reader 2 (Exit Gate)."""
-        detected_ports = self.get_available_com_ports()
-        print("\n==============================================")
-        print(" [RFID AUTO-DETECT] SCANNING SERIAL COM PORTS")
-        print(f" Detected Active Ports: {detected_ports}")
-        print("==============================================")
+        """Monitors for USB RFID readers during initial 10-second window and assigns In Gate and Exit Gate."""
+        print("\n" + "=" * 65)
+        print(" 🔍 [RFID AUTO-DETECT] 10-SECOND DISCOVERY WINDOW STARTED")
+        print(" -> Waiting for USB RFID Readers to be plugged in / initialized...")
+        print(" -> 1st USB Port Detected ===> Assigned to IN GATE (Check-In)")
+        print(" -> 2nd USB Port Detected ===> Assigned to EXIT GATE (Check-Out)")
+        print("=" * 65)
 
-        # Dynamic Assignment:
-        # If 2 or more ports found: Port 0 -> Entry Gate, Port 1 -> Exit Gate
-        # If 1 port found: Port 0 -> Entry Gate
-        # If 0 ports found: Standby for hotplug
-        if len(detected_ports) >= 2:
-            target_checkin = detected_ports[0]
-            target_checkout = detected_ports[1]
-        elif len(detected_ports) == 1:
-            target_checkin = detected_ports[0]
-            target_checkout = None
-            print("[RFID INFO] Single reader detected. Assigned to Entry Gate (Check-In).")
-        else:
-            target_checkin = self.checkin_port if self._is_port_valid(self.checkin_port) else None
-            target_checkout = self.checkout_port if self._is_port_valid(self.checkout_port) else None
+        start_time = time.time()
+        discovered_order: List[str] = []
 
-        # Connect Check-In Reader
-        if target_checkin and not self.ser_checkin:
-            self.ser_checkin = self._open_serial(target_checkin, "Entry Gate (Check-In)")
+        # Countdown loop for 10 seconds, polling every second
+        for remaining in range(10, 0, -1):
+            current_usb = self.get_available_com_ports()
+            for port in current_usb:
+                if port not in discovered_order:
+                    discovered_order.append(port)
+                    gate_num = len(discovered_order)
+                    gate_name = "IN GATE (Entry / Check-In)" if gate_num == 1 else "EXIT GATE (Dispatch / Check-Out)"
+                    print("\n" + "#" * 65)
+                    print(f" 🚪 [PORT DETECTED #{gate_num}] {port}")
+                    print(f" -> Assigned to: {gate_name}")
+                    print(f" -> Protocol: SRK-UDR6 @ {self.baudrate} baud")
+                    print("#" * 65 + "\n")
+
+            if len(discovered_order) >= 2:
+                print(" ✅ [RFID AUTO-DETECT] Both In Gate and Exit Gate discovered! Finalizing setup...\n")
+                break
+
+            print(f" [RFID DISCOVERY] Scanning USB ports... ({remaining}s remaining)")
+            time.sleep(1.0)
+
+        # Final check after countdown
+        for port in self.get_available_com_ports():
+            if port not in discovered_order:
+                discovered_order.append(port)
+
+        print(f"\n[RFID SUMMARY] Discovered USB Hardware Ports in sequence: {discovered_order}")
+
+        # Connect Gate 1 (IN GATE)
+        if len(discovered_order) >= 1 and not self.ser_checkin:
+            target_checkin = discovered_order[0]
+            self.ser_checkin = self._open_serial(target_checkin, "IN GATE (Entry / Check-In)")
             if self.ser_checkin:
                 self.checkin_port = target_checkin
+                print(f"✅ [IN GATE ONLINE] Listening on {target_checkin} @ {self.baudrate} baud.")
 
-        # Connect Check-Out Reader
-        if target_checkout and not self.ser_checkout and target_checkout != target_checkin:
-            self.ser_checkout = self._open_serial(target_checkout, "Exit Gate (Check-Out)")
+        # Connect Gate 2 (EXIT GATE)
+        if len(discovered_order) >= 2 and not self.ser_checkout:
+            target_checkout = discovered_order[1]
+            self.ser_checkout = self._open_serial(target_checkout, "EXIT GATE (Dispatch / Check-Out)")
             if self.ser_checkout:
                 self.checkout_port = target_checkout
+                print(f"✅ [EXIT GATE ONLINE] Listening on {target_checkout} @ {self.baudrate} baud.")
+
+        if not self.ser_checkin and not self.ser_checkout:
+            print(" ℹ️ [RFID STANDBY] No USB reader active during initial 10s. Hotplug watchdog active.\n")
 
     def _is_port_valid(self, p: Optional[str]) -> bool:
         return bool(p and (os.path.exists(p) or p.upper().startswith("COM")))
@@ -166,29 +201,36 @@ class DualRFIDManager:
     def _hotplug_watchdog(self):
         """Periodically checks if readers were plugged in or need reconnection."""
         while self._running:
-            time.sleep(5.0)
+            time.sleep(3.0)
             if not self.ser_checkin or not self.ser_checkout:
                 try:
                     detected = self.get_available_com_ports()
-                    if not self.ser_checkin and len(detected) > 0:
-                        used = [s.port for s in [self.ser_checkin, self.ser_checkout] if s]
-                        available = [p for p in detected if p not in used]
-                        if available:
-                            self.ser_checkin = self._open_serial(available[0], "Entry Gate (Check-In)")
-                            if self.ser_checkin:
-                                self.checkin_port = available[0]
-                                t = threading.Thread(target=self._reader_loop, args=(self.ser_checkin, "CHECK_IN"), daemon=True)
-                                t.start()
+                    used = [s.port for s in [self.ser_checkin, self.ser_checkout] if s]
+                    available = [p for p in detected if p not in used]
 
-                    if not self.ser_checkout and len(detected) > 1:
-                        used = [s.port for s in [self.ser_checkin, self.ser_checkout] if s]
-                        available = [p for p in detected if p not in used]
-                        if available:
-                            self.ser_checkout = self._open_serial(available[0], "Exit Gate (Check-Out)")
-                            if self.ser_checkout:
-                                self.checkout_port = available[0]
-                                t = threading.Thread(target=self._reader_loop, args=(self.ser_checkout, "CHECK_OUT"), daemon=True)
-                                t.start()
+                    if not self.ser_checkin and len(available) > 0:
+                        port = available.pop(0)
+                        print("\n" + "#" * 65)
+                        print(f" 🚪 [HOTPLUG DETECTED] {port} -> Assigned to: IN GATE (Entry / Check-In)")
+                        print("#" * 65 + "\n")
+                        self.ser_checkin = self._open_serial(port, "IN GATE (Entry / Check-In)")
+                        if self.ser_checkin:
+                            self.checkin_port = port
+                            t = threading.Thread(target=self._reader_loop, args=(self.ser_checkin, "CHECK_IN"), daemon=True)
+                            self._threads.append(t)
+                            t.start()
+
+                    if not self.ser_checkout and len(available) > 0:
+                        port = available.pop(0)
+                        print("\n" + "#" * 65)
+                        print(f" 🚪 [HOTPLUG DETECTED] {port} -> Assigned to: EXIT GATE (Dispatch / Check-Out)")
+                        print("#" * 65 + "\n")
+                        self.ser_checkout = self._open_serial(port, "EXIT GATE (Dispatch / Check-Out)")
+                        if self.ser_checkout:
+                            self.checkout_port = port
+                            t = threading.Thread(target=self._reader_loop, args=(self.ser_checkout, "CHECK_OUT"), daemon=True)
+                            self._threads.append(t)
+                            t.start()
                 except Exception:
                     pass
 

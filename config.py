@@ -4,14 +4,43 @@ Centralized settings for IPs, GPIO pins, thresholds, audio mappings, and RFID ti
 """
 
 import os
+import socket
+
+# Load local .env if present
+_env_file = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_file):
+    try:
+        with open(_env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except Exception:
+        pass
+
+def get_lan_ip() -> str:
+    """Dynamically detects the actual local network IP of this device."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return "127.0.0.1"
 
 # ==========================================
 # 🌐 NETWORK CONFIGURATION
 # ==========================================
-PI_IP = "192.168.1.103"
-ESP32_IP = "192.168.1.101"
-ESP8266_IP = "192.168.1.102"
-FLASK_PORT = 5000
+PI_IP = os.environ.get("PI_IP", get_lan_ip())
+ESP32_IP = os.environ.get("ESP32_IP", "192.168.1.101")
+ESP8266_IP = os.environ.get("ESP8266_IP", "192.168.1.102")
+FLASK_PORT = int(os.environ.get("FLASK_PORT", 5000))
 
 # Base URL for ESP8266 Audio Subsystem
 AUDIO_BASE_URL = f"http://{ESP8266_IP}/audio"
@@ -53,11 +82,11 @@ AUDIO_ALERT_COOLDOWN_SEC = 10.0  # Prevent repeating the same audio alert contin
 # ==========================================
 # 🌡️ SENSOR THRESHOLDS
 # ==========================================
-TEMP_HIGH_THRESHOLD = 40.0   # °C
-TEMP_LOW_THRESHOLD = 20.0    # °C
-HUMIDITY_HIGH_THRESHOLD = 70.0  # %
-HUMIDITY_LOW_THRESHOLD = 30.0   # %
-SENSOR_OFFLINE_TIMEOUT_SEC = 6.0 # Mark ESP32 offline if no POST received within 6s
+TEMP_HIGH_THRESHOLD = 45.0   # °C (Alarm only on fire/overheating)
+TEMP_LOW_THRESHOLD = 5.0     # °C (Alarm only on severe freezing)
+HUMIDITY_HIGH_THRESHOLD = 85.0  # % (High humidity warning)
+HUMIDITY_LOW_THRESHOLD = 15.0   # % (Dry air warning)
+SENSOR_OFFLINE_TIMEOUT_SEC = 8.0 # Mark ESP32 offline if no POST received within 8s
 
 # ==========================================
 # 📷 VISION & FACE RECOGNITION

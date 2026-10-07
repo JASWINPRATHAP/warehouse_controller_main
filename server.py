@@ -10,7 +10,7 @@ Features:
 
 import time
 from flask import Flask, request, jsonify, Response
-from config import FLASK_PORT
+from config import FLASK_PORT, AUDIO_MAP
 from sensor_evaluator import sensors
 from vision_manager import vision
 from door_controller import door
@@ -40,6 +40,12 @@ def add_cors_headers(response):
 def ping_check():
     return jsonify({"status": "pong", "time": time.time()}), 200
 
+@app.route("/api/db/test", methods=["GET"])
+def api_db_test():
+    """Tests Supabase PostgreSQL database connectivity."""
+    result = db.verify_connection()
+    return jsonify(result), 200
+
 # ==========================================
 # 🏠 HEADLESS ROOT & HEALTH CHECK
 # ==========================================
@@ -54,6 +60,8 @@ def headless_index():
             "camera1_live_surveillance": "/video1"
         },
         "endpoints": {
+            "trigger_incident": "POST /api/trigger-incident",
+            "db_test": "GET /api/db/test",
             "sensor_ingress": "POST /sensor",
             "sensor_status": "GET /sensor",
             "door_close": "POST /api/door/close",
@@ -93,19 +101,76 @@ def sensor_get():
     return jsonify({"status": "online", "last_sensor": sensors.latest_sensor_data}), 200
 
 # ==========================================
+# 🚨 WEB INCIDENT TRIGGER DISPATCHER
+# ==========================================
+@app.route("/api/trigger-incident", methods=["POST"])
+def api_trigger_incident():
+    """
+    Receives an incident dispatch from the Web Dashboard or Simulator.
+    Triggers the ESP8266 audio speaker (Tracks 1-12), closes door if unauthorized,
+    and logs the alert into Supabase.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        incident_type = data.get("incident_type", "MANUAL_ALERT").upper()
+        severity = data.get("severity", "CRITICAL")
+        details = data.get("details", {})
+
+        track_num = data.get("track")
+        if not track_num:
+            track_num = AUDIO_MAP.get(incident_type, 7)
+
+        print(f"🚨 [REMOTE INCIDENT] Triggered from Web: {incident_type} -> Track #{track_num}")
+        audio.play(int(track_num), force=True)
+
+        door_action = "none"
+        if any(k in incident_type for k in ["UNAUTHORIZED", "INTRUDER", "BREACH"]):
+            door.close_door_async()
+            door_action = "closing"
+
+        db.log_security_alert(incident_type, severity, {
+            "source": "Web Dashboard Trigger",
+            "track_played": track_num,
+            "details": details
+        })
+        logger.log_event("WEB_INCIDENT_TRIGGERED", {
+            "incident": incident_type,
+            "track": track_num,
+            "door_action": door_action
+        })
+
+        return jsonify({
+            "status": "incident_dispatched",
+            "incident_type": incident_type,
+            "track": track_num,
+            "door_action": door_action,
+            "db_logged": True
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==========================================
 # 📷 VIDEO STREAMING ENDPOINTS
 # ==========================================
 @app.route("/video0")
 def video_feed_cam0():
     """Camera 0: AI Face Recognition stream with visual bounding boxes."""
-    return Response(vision.generate_mjpeg_stream(0),
+    resp = Response(vision.generate_mjpeg_stream(0),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 @app.route("/video1")
 def video_feed_cam1():
     """Camera 1: Live Surveillance stream."""
-    return Response(vision.generate_mjpeg_stream(1),
+    resp = Response(vision.generate_mjpeg_stream(1),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 # ==========================================
 # 🚪 MOTORIZED DOOR CONTROL APIS
