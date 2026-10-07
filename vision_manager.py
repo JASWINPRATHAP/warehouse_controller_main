@@ -336,29 +336,48 @@ class VisionManager:
         })
 
     def generate_mjpeg_stream(self, camera_index: int):
-        """Yields multipart MJPEG stream for Flask streaming endpoint."""
-        while self._running:
-            if camera_index == 0:
-                with self._lock:
-                    frame = self._annotated_cam0_frame or self.latest_frame_cam0
-                if frame is None:
-                    frame = self._grab_cam0_frame()
-                if frame is None:
-                    frame = self._generate_standby_frame("Camera 0 (AI Face Recognition)")
-            else:
-                frame = self._grab_cam1_frame()
-                if frame is None:
-                    frame = self._generate_standby_frame("Camera 1 (Live Surveillance)")
+        """Yields multipart MJPEG stream for Flask streaming endpoint. Never exits or drops connection."""
+        if not self._running:
+            self.start()
 
-            bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if len(frame.shape) == 3 else frame
-            ret, jpeg = cv2.imencode('.jpg', bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            if not ret:
-                time.sleep(0.05)
-                continue
+        while True:
+            try:
+                frame = None
+                if camera_index == 0:
+                    with self._lock:
+                        frame = self._annotated_cam0_frame or self.latest_frame_cam0
+                    if frame is None:
+                        frame = self._grab_cam0_frame()
+                    if frame is None:
+                        frame = self._generate_standby_frame("Camera 0 (AI Face Biometric)")
+                else:
+                    frame = self._grab_cam1_frame()
+                    if frame is None:
+                        frame = self._generate_standby_frame("Camera 1 (Live Surveillance)")
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            time.sleep(0.04)
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if (frame is not None and len(frame.shape) == 3) else frame
+                if bgr_frame is None:
+                    bgr_frame = self._generate_standby_frame(f"Camera {camera_index}")
+
+                ret, jpeg = cv2.imencode('.jpg', bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                if not ret:
+                    time.sleep(0.05)
+                    continue
+
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                time.sleep(0.04)
+            except Exception as e:
+                # Fallback to standby on unexpected frame capture error so stream never breaks
+                try:
+                    fallback = self._generate_standby_frame(f"Camera {camera_index} Stream")
+                    ret, jpeg = cv2.imencode('.jpg', fallback, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                    if ret:
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                except Exception:
+                    pass
+                time.sleep(0.1)
 
     def stop(self):
         """Stops cameras cleanly."""

@@ -8,6 +8,7 @@ Features:
 - Centralized Data Sync to Supabase Cloud DB
 """
 
+import time
 from flask import Flask, request, jsonify, Response
 from config import FLASK_PORT
 from sensor_evaluator import sensors
@@ -24,6 +25,20 @@ app = Flask(__name__)
 def on_rfid_event(payload):
     logger.log_event(payload.get("event", "RFID_SCAN"), payload)
 rfid.register_callback(on_rfid_event)
+
+# ==========================================
+# 🌐 CORS MIDDLEWARE (Allow Laptop Web App)
+# ==========================================
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
+    return response
+
+@app.route("/api/ping")
+def ping_check():
+    return jsonify({"status": "pong", "time": time.time()}), 200
 
 # ==========================================
 # 🏠 HEADLESS ROOT & HEALTH CHECK
