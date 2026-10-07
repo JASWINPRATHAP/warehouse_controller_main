@@ -59,7 +59,7 @@ def main():
     print(f"  -> ESP32 Sensor Endpoint : http://{PI_IP}:{FLASK_PORT}/sensor")
     print(f"  -> Camera 0 AI Stream    : http://{PI_IP}:{FLASK_PORT}/video0")
     print(f"  -> Camera 1 Live Stream  : http://{PI_IP}:{FLASK_PORT}/video1")
-    print(f"  -> Web Dashboard         : http://{PI_IP}:{FLASK_PORT}/")
+    print(f"  -> Headless API Endpoint : http://{PI_IP}:{FLASK_PORT}/")
     print("\n[SYSTEM READY] Listening for sensor telemetry, RFID tags, and video feeds.\n")
 
     run_server()

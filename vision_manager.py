@@ -1,7 +1,17 @@
 """
 Vision Subsystem & Background AI Face Recognition Manager.
-Controls Camera 0 (Picamera2 AI Face Recognition) and Camera 1 (Live Video Feed).
-Triggers Audio 7 and Door Close sequence upon 3-frame confirmation of unknown face.
+Controls Camera 0 (AI Face Recognition) and Camera 1 (Live Surveillance Stream).
+Features:
+- Dual-Backend Support: Picamera2 (CSI) with automatic fallback to OpenCV (USB V4L2)
+- Biometric verification against known_faces/ folder
+- Automatic Unauthorized Intruder detection (even when known_faces is empty)
+- 3-frame confirmation triggers:
+  1. Cropped snapshot saved to unknown_faces/
+  2. Dispatches Audio Track 7 (Unauthorized Face Alert)
+  3. Initiates motorized security door closing sequence
+  4. Realtime alert logged to Supabase Cloud DB
+- Live visual bounding box annotations on /video0 stream
+- Synthetic standby HUD when physical cameras are offline
 """
 
 import os
@@ -9,8 +19,10 @@ import time
 import glob
 import threading
 import cv2
+import numpy as np
 from datetime import datetime
 from typing import Optional, List, Tuple
+
 from config import (
     CAMERA_WIDTH, CAMERA_HEIGHT, FACE_TOLERANCE, CONFIRMATION_FRAMES,
     FACE_COOLDOWN_SEC, KNOWN_FACES_DIR, UNKNOWN_FACES_DIR
@@ -19,21 +31,19 @@ from audio_manager import audio
 from door_controller import door
 from db_manager import db
 
-import numpy as np
-
 try:
     import face_recognition
     FACE_REC_AVAILABLE = True
 except ImportError:
     FACE_REC_AVAILABLE = False
-    print("[WARN] face_recognition library not installed. Face recognition will run in simulation mode.")
+    print("[WARN] face_recognition library not installed. Face recognition running in simulated mode.")
 
 try:
     from picamera2 import Picamera2
     PICAMERA2_AVAILABLE = True
 except (ImportError, Exception):
     PICAMERA2_AVAILABLE = False
-    print("[WARN] Picamera2 not available. Using OpenCV webcam or simulated video.")
+    print("[WARN] Picamera2 not available. Using OpenCV webcam or synthetic video.")
 
 class VisionManager:
     def __init__(self):
@@ -44,9 +54,10 @@ class VisionManager:
 
         self.known_face_encodings = []
         self.known_face_names = []
-        
+
         self.latest_frame_cam0 = None
         self.latest_frame_cam1 = None
+        self._annotated_cam0_frame = None
         self._lock = threading.Lock()
 
         self._running = False
@@ -80,19 +91,23 @@ class VisionManager:
                 if encodings:
                     self.known_face_encodings.append(encodings[0])
                     self.known_face_names.append(name)
-                    print(f"[VISION] Loaded authorized face reference: '{name}'")
+                    print(f"[VISION] Loaded authorized reference face: '{name}'")
                 else:
                     print(f"[VISION WARN] No face found in {img_path}")
             except Exception as e:
                 print(f"[VISION ERROR] Error loading {img_path}: {e}")
 
+        print(f"[VISION] Total authorized people loaded: {len(self.known_face_names)}")
+
     def _init_cameras(self):
-        """Initializes Picamera2 instances or falls back to OpenCV V4L2 USB cameras."""
+        """Initializes Picamera2 instances or OpenCV USB video capture devices."""
         # Camera 0 Init (AI Recognition Cam)
         if PICAMERA2_AVAILABLE:
             try:
                 self.cam0 = Picamera2(0)
-                self.cam0.configure(self.cam0.create_preview_configuration(main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT), "format": "RGB888"}))
+                self.cam0.configure(self.cam0.create_preview_configuration(
+                    main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT), "format": "RGB888"}
+                ))
                 self.cam0.start()
                 self.cam0_backend = "picamera2"
                 print("[VISION] Camera 0 (Picamera2 CSI) initialized for AI recognition.")
@@ -114,20 +129,21 @@ class VisionManager:
             except Exception as e:
                 print(f"[VISION WARN] OpenCV Camera 0 failed: {e}")
 
-        # Camera 1 Init (Live Feed Cam)
+        # Camera 1 Init (Live Surveillance Feed Cam)
         if PICAMERA2_AVAILABLE:
             try:
                 self.cam1 = Picamera2(1)
-                self.cam1.configure(self.cam1.create_preview_configuration(main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT), "format": "RGB888"}))
+                self.cam1.configure(self.cam1.create_preview_configuration(
+                    main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT), "format": "RGB888"}
+                ))
                 self.cam1.start()
                 self.cam1_backend = "picamera2"
                 print("[VISION] Camera 1 (Picamera2 CSI) initialized for Live stream.")
-            except Exception as e:
+            except Exception:
                 self.cam1 = None
 
         if self.cam1 is None:
             try:
-                # Try index 1, or if cam0 was picamera2, try index 0 for USB
                 cam1_idx = 1 if self.cam0_backend == "cv2" else 0
                 cap1 = cv2.VideoCapture(cam1_idx)
                 if cap1.isOpened():
@@ -137,12 +153,12 @@ class VisionManager:
                     self.cam1_backend = "cv2"
                     print(f"[VISION] Camera 1 (OpenCV USB dev {cam1_idx}) initialized for Live stream.")
                 else:
-                    print("[VISION INFO] Camera 1 not connected. Standby placeholder active.")
+                    print("[VISION INFO] Camera 1 standby placeholder active.")
             except Exception as e:
                 print(f"[VISION INFO] Camera 1 fallback unavailable: {e}")
 
     def start(self):
-        """Starts background frame acquisition and AI face recognition thread."""
+        """Starts background AI face recognition thread."""
         if self._running:
             return
         self._running = True
@@ -158,7 +174,7 @@ class VisionManager:
                     ret, frame = self.cam0.read()
                     if ret and frame is not None:
                         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            except Exception as e:
+            except Exception:
                 return None
         return None
 
@@ -171,35 +187,30 @@ class VisionManager:
                     ret, frame = self.cam1.read()
                     if ret and frame is not None:
                         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            except Exception as e:
+            except Exception:
                 return None
         return None
 
     def _generate_standby_frame(self, title: str):
-        """Generates a high-tech synthetic standby HUD frame when physical feed is unavailable."""
+        """Generates a clean synthetic standby HUD frame when physical feed is offline."""
         frame = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
-        frame[:] = (24, 28, 36)  # Dark sleek slate RGB
+        frame[:] = (24, 28, 36)
 
-        # Outer bounding box
         cv2.rectangle(frame, (12, 12), (CAMERA_WIDTH - 12, CAMERA_HEIGHT - 12), (70, 85, 105), 2)
         cv2.line(frame, (12, 50), (CAMERA_WIDTH - 12, 50), (70, 85, 105), 1)
 
-        # Header Title
         cv2.putText(frame, title.upper(), (30, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 210, 255), 2)
-
-        # Status text
-        cv2.putText(frame, "STANDBY FEED - WAITING FOR INPUT", (50, CAMERA_HEIGHT // 2 - 10),
+        cv2.putText(frame, "STANDBY FEED - WAITING FOR CAMERA", (50, CAMERA_HEIGHT // 2 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 190, 205), 2)
 
         now_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
         cv2.putText(frame, f"TIMESTAMP: {now_str}", (50, CAMERA_HEIGHT // 2 + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 140, 160), 1)
-
         return frame
 
     def _ai_face_loop(self):
-        """Dedicated background AI face recognition loop (never blocks HTTP server)."""
-        print("[VISION] AI Face Recognition background worker started.")
+        """Dedicated background AI face recognition loop."""
+        print("[VISION] Dedicated AI Face Recognition background worker running.")
         while self._running:
             frame = self._grab_cam0_frame()
             if frame is None:
@@ -209,52 +220,83 @@ class VisionManager:
             with self._lock:
                 self.latest_frame_cam0 = frame
 
-            if not FACE_REC_AVAILABLE or not self.known_face_encodings:
+            if not FACE_REC_AVAILABLE:
                 time.sleep(0.2)
                 continue
 
-            # Scale down frame slightly for high-speed AI processing
+            # Scale down frame to 0.5x for high-speed AI processing
             small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-            rgb_small = small_frame if self.cam0_backend == "picamera2" else small_frame
+            # Ensure RGB format for face_recognition
+            rgb_small = small_frame
 
             face_locations = face_recognition.face_locations(rgb_small)
             if not face_locations:
                 self.unknown_consecutive_count = 0
-                self.last_recognition_status = "no_face"
+                self.last_recognition_status = "idle_no_face"
+                with self._lock:
+                    self._annotated_cam0_frame = frame.copy()
                 time.sleep(0.1)
                 continue
 
+            # A face IS detected! Encode it
             face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
 
-            is_authorized = False
-            detected_name = "Unknown"
+            annotated = frame.copy()
+            has_unknown_intruder = False
+            primary_detected_name = "Unknown"
 
             for face_encoding, face_loc in zip(face_encodings, face_locations):
-                matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=FACE_TOLERANCE)
-                face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
+                is_authorized = False
+                person_name = "Unknown"
 
-                if True in matches:
-                    best_match_index = face_distances.argmin()
-                    if face_distances[best_match_index] <= FACE_TOLERANCE:
-                        is_authorized = True
-                        detected_name = self.known_face_names[best_match_index]
-                        break
+                # Check against known faces if available
+                if self.known_face_encodings:
+                    matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=FACE_TOLERANCE)
+                    face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
 
-            if is_authorized:
-                self.unknown_consecutive_count = 0
-                self.last_detected_person = detected_name
-                self.last_recognition_status = f"Authorized ({detected_name})"
-            else:
+                    if True in matches:
+                        best_match_idx = face_distances.argmin()
+                        if face_distances[best_match_idx] <= FACE_TOLERANCE:
+                            is_authorized = True
+                            person_name = self.known_face_names[best_match_idx]
+
+                # Scale back coordinates (0.5x -> 2x)
+                top, right, bottom, left = [c * 2 for c in face_loc]
+
+                if is_authorized:
+                    box_color = (0, 255, 0) # Green for Authorized
+                    label = f"AUTHORIZED: {person_name.upper()}"
+                    primary_detected_name = person_name
+                else:
+                    box_color = (255, 0, 0) # Red for Intruder in RGB
+                    label = "UNAUTHORIZED INTRUDER"
+                    has_unknown_intruder = True
+
+                # Draw bounding box and label on annotated frame
+                cv2.rectangle(annotated, (left, top), (right, bottom), box_color, 2)
+                cv2.rectangle(annotated, (left, bottom - 26), (right, bottom), box_color, cv2.FILLED)
+                cv2.putText(annotated, label, (left + 6, bottom - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            with self._lock:
+                self._annotated_cam0_frame = annotated
+
+            # Evaluate state logic
+            if has_unknown_intruder:
                 self.unknown_consecutive_count += 1
-                self.last_detected_person = "Unknown"
-                self.last_recognition_status = f"Unknown (Frame {self.unknown_consecutive_count}/{CONFIRMATION_FRAMES})"
+                self.last_detected_person = "Unauthorized Intruder"
+                self.last_recognition_status = f"INTRUDER_DETECTED (Frame {self.unknown_consecutive_count}/{CONFIRMATION_FRAMES})"
+                print(f"⚠️ [VISION ALERT] Unknown face detected: Frame {self.unknown_consecutive_count}/{CONFIRMATION_FRAMES}")
 
-                # Check if 3 confirmation frames reached and cooldown passed
                 now = time.time()
                 if self.unknown_consecutive_count >= CONFIRMATION_FRAMES and (now - self.last_unauthorized_time > FACE_COOLDOWN_SEC):
                     self.last_unauthorized_time = now
                     self.unknown_consecutive_count = 0
                     self._trigger_unauthorized_protocol(frame, face_locations[0])
+            else:
+                self.unknown_consecutive_count = 0
+                self.last_detected_person = primary_detected_name
+                self.last_recognition_status = f"Authorized ({primary_detected_name})"
 
             time.sleep(0.08)
 
@@ -264,8 +306,7 @@ class VisionManager:
         img_filename = f"{now_str}.jpg"
         img_path = os.path.join(UNKNOWN_FACES_DIR, img_filename)
 
-        # Scale up bounding box back to original frame coordinates (fx=0.5 -> 2x)
-        top, right, bottom, left = [coord * 2 for coord in face_loc_scaled]
+        top, right, bottom, left = [c * 2 for c in face_loc_scaled]
         h, w = full_frame.shape[:2]
         top = max(0, top - 20)
         left = max(0, left - 20)
@@ -275,46 +316,39 @@ class VisionManager:
         face_crop = full_frame[top:bottom, left:right]
         try:
             cv2.imwrite(img_path, cv2.cvtColor(face_crop, cv2.COLOR_RGB2BGR))
-            print(f"\n🚨 [SECURITY ALERT] Unauthorized face confirmed! Saved snapshot to: {img_path}")
+            print(f"\n🚨 [SECURITY BREACH] Unauthorized intruder confirmed! Snapshot saved to: {img_path}")
         except Exception as e:
-            print(f"[VISION ERROR] Could not save face snapshot: {e}")
+            print(f"[VISION ERROR] Could not save snapshot: {e}")
 
-        # 1. Trigger Audio 7 (Unauthorized face detected)
+        # 1. Trigger Audio Track 7 (Unauthorized Face Alert)
         audio.play(7, force=True)
 
-        # 2. Trigger Door Closing sequence
+        # 2. Trigger Motorized Door Closing Sequence
+        print("[SECURITY ACTION] Closing warehouse motorized security door immediately!")
         door.close_door_async()
 
-        # 3. Log Critical Security Alert to Supabase
+        # 3. Log Critical Alert to Supabase
         db.log_security_alert("UNAUTHORIZED_FACE", "CRITICAL", {
             "snapshot_file": img_filename,
             "detected_at": now_str,
             "camera": "Camera 0 (AI Gate)",
-            "door_action": "CLOSING_SEQUENCE_INITIATED"
+            "door_action": "AUTOMATIC_CLOSE_TRIGGERED"
         })
 
     def generate_mjpeg_stream(self, camera_index: int):
         """Yields multipart MJPEG stream for Flask streaming endpoint."""
         while self._running:
             if camera_index == 0:
-                frame = self.latest_frame_cam0
+                with self._lock:
+                    frame = self._annotated_cam0_frame or self.latest_frame_cam0
                 if frame is None:
-                    # Attempt a direct grab if background AI loop is initializing
                     frame = self._grab_cam0_frame()
                 if frame is None:
                     frame = self._generate_standby_frame("Camera 0 (AI Face Recognition)")
-                else:
-                    frame = frame.copy()
-                    # Overlay status box on Camera 0
-                    overlay_text = f"AI: {self.last_recognition_status} | Person: {self.last_detected_person}"
-                    color = (0, 255, 0) if "Authorized" in self.last_recognition_status else (0, 0, 255)
-                    cv2.putText(frame, overlay_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             else:
                 frame = self._grab_cam1_frame()
                 if frame is None:
-                    frame = self._generate_standby_frame("Camera 1 (Live Feed)")
-                else:
-                    frame = frame.copy()
+                    frame = self._generate_standby_frame("Camera 1 (Live Surveillance)")
 
             bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if len(frame.shape) == 3 else frame
             ret, jpeg = cv2.imencode('.jpg', bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -348,4 +382,3 @@ class VisionManager:
 
 # Global singleton
 vision = VisionManager()
-
