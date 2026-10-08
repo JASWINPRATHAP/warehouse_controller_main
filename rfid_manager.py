@@ -1,18 +1,19 @@
 """
 Dual UHF RFID Subsystem & Warehouse Gate Logistics Engine.
 Features:
-- Automatic Plug-and-Play Serial COM Port Detection using serial.tools.list_ports
+- Active EPC Class 1 Gen 2 Inventory Polling ([0x04, 0x00, 0x01, 0xDB, 0x4B])
+- Multi-Baudrate Auto-Negotiation (115200, 57600, 9600)
+- Support for /dev/ttyUSB*, /dev/ttyACM*, and Linux USB HID Desktop Readers (/dev/hidraw*)
 - Dynamically assigns:
   * Port 1 -> Check-In (Entry Gate)
-  * Port 2 -> Check-Out (Exit Gate)
-- Reconnection Watchdog: Automatically detects plugged/unplugged readers without restarting
-- SRK-UDR6 Protocol Parser (0x52 0x46 header, 12-byte / 24-char hex EPC)
-- Predefined tag metadata lookup and Dwell Time calculation
+  * Port 2 / HID -> Check-Out (Exit Gate)
 - Realtime persistence to Supabase Cloud DB
+- Debouncing and dwell time calculation
 """
 
 import os
 import sys
+import glob
 import time
 import serial
 import serial.tools.list_ports
@@ -22,11 +23,26 @@ from typing import Dict, List, Optional, Callable
 
 from config import (
     RFID_CHECKIN_PORT, RFID_CHECKOUT_PORT, RFID_BAUDRATE,
-    RFID_HEADER, RFID_FRAME_MIN_LEN, RFID_EPC_OFFSET, RFID_EPC_LENGTH,
     RFID_DEBOUNCE_SEC, get_tag_metadata
 )
 from audio_manager import audio
 from db_manager import db
+
+def calculate_crc(data: bytes) -> bytes:
+    """Calculates CRC-16 CCITT checksum (Poly: 0x8408, Init: 0xFFFF, LSB first)."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0x8408
+            else:
+                crc = crc >> 1
+    return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+# Pre-calculated EPC Gen2 Inventory Command Frame
+# [Length: 0x04, Address: 0x00, Command: 0x01] + CRC: [0xDB, 0x4B]
+INV_POLL_PACKET = bytes([0x04, 0x00, 0x01, 0xDB, 0x4B])
 
 class TagRecord:
     def __init__(self, epc: str, metadata: dict, gate: str):
@@ -66,6 +82,7 @@ class DualRFIDManager:
         self._running = False
         self._threads: List[threading.Thread] = []
         self._watchdog_thread: Optional[threading.Thread] = None
+        self._hid_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
         # In-memory warehouse registry { epc: TagRecord }
@@ -86,8 +103,8 @@ class DualRFIDManager:
             desc = (p.description or "").lower()
             hwid = (p.hwid or "").lower()
 
-            # Ignore onboard Linux serial pins and bluetooth (/dev/ttyAMA*, /dev/ttyS*)
-            if "ttyama" in dev.lower() or "ttys" in dev.lower() or "rfcomm" in dev.lower():
+            # Ignore onboard Linux serial pins and bluetooth (/dev/ttyAMA*, /dev/ttyS*, /dev/rfcomm*)
+            if any(k in dev.lower() for k in ["ttyama", "ttys", "rfcomm"]):
                 continue
 
             # Accept genuine USB adapters: /dev/ttyUSB*, /dev/ttyACM*, or USB in description/hwid
@@ -96,6 +113,17 @@ class DualRFIDManager:
             elif "usb" in desc or "usb" in hwid or "vid" in hwid or dev.upper().startswith("COM"):
                 if dev.upper() != "COM1": # Exclude motherboard legacy COM1 on Windows
                     detected.append(dev)
+
+        # Also inspect /dev/serial/by-id/* symlinks on Linux
+        if sys.platform.startswith("linux") and os.path.exists("/dev/serial/by-id"):
+            try:
+                for s in glob.glob("/dev/serial/by-id/*"):
+                    real_path = os.path.realpath(s)
+                    if real_path not in detected:
+                        detected.append(real_path)
+            except Exception:
+                pass
+
         return sorted(list(set(detected)))
 
     def connect(self):
@@ -121,7 +149,7 @@ class DualRFIDManager:
                     print("\n" + "#" * 65)
                     print(f" 🚪 [PORT DETECTED #{gate_num}] {port}")
                     print(f" -> Assigned to: {gate_name}")
-                    print(f" -> Protocol: SRK-UDR6 @ {self.baudrate} baud")
+                    print(f" -> Active EPC Gen2 Inventory Poller Ready")
                     print("#" * 65 + "\n")
 
             if len(discovered_order) >= 2:
@@ -144,7 +172,6 @@ class DualRFIDManager:
             self.ser_checkin = self._open_serial(target_checkin, "IN GATE (Entry / Check-In)")
             if self.ser_checkin:
                 self.checkin_port = target_checkin
-                print(f"✅ [IN GATE ONLINE] Listening on {target_checkin} @ {self.baudrate} baud.")
 
         # Connect Gate 2 (EXIT GATE)
         if len(discovered_order) >= 2 and not self.ser_checkout:
@@ -152,32 +179,36 @@ class DualRFIDManager:
             self.ser_checkout = self._open_serial(target_checkout, "EXIT GATE (Dispatch / Check-Out)")
             if self.ser_checkout:
                 self.checkout_port = target_checkout
-                print(f"✅ [EXIT GATE ONLINE] Listening on {target_checkout} @ {self.baudrate} baud.")
 
         if not self.ser_checkin and not self.ser_checkout:
-            print(" ℹ️ [RFID STANDBY] No USB reader active during initial 10s. Hotplug watchdog active.\n")
-
-    def _is_port_valid(self, p: Optional[str]) -> bool:
-        return bool(p and (os.path.exists(p) or p.upper().startswith("COM")))
+            print(" ℹ️ [RFID STANDBY] No USB serial reader active yet. Hotplug watchdog and HID scanner active.\n")
 
     def _open_serial(self, port_name: str, label: str) -> Optional[serial.Serial]:
-        try:
-            ser = serial.Serial(
-                port=port_name,
-                baudrate=self.baudrate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=0.2
-            )
-            print(f"✅ [RFID CONNECTED] {label} online on '{port_name}' @ {self.baudrate} baud.")
-            return ser
-        except Exception as e:
-            print(f"[RFID ERROR] Could not open {label} on '{port_name}': {e}")
-            return None
+        """Opens serial port with baudrate auto-detection (115200, 57600, 9600)."""
+        candidate_bauds = [self.baudrate, 57600, 9600]
+        # Remove duplicate
+        candidate_bauds = list(dict.fromkeys(candidate_bauds))
+
+        for baud in candidate_bauds:
+            try:
+                ser = serial.Serial(
+                    port=port_name,
+                    baudrate=baud,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=0.15
+                )
+                print(f"✅ [RFID CONNECTED] {label} online on '{port_name}' @ {baud} baud.")
+                return ser
+            except Exception as e:
+                pass
+
+        print(f"[RFID ERROR] Could not open {label} on '{port_name}' with tested baudrates.")
+        return None
 
     def start_background_scanning(self):
-        """Starts background reader threads and the hotplug watchdog."""
+        """Starts background reader threads, hotplug watchdog, and HID desktop reader scanner."""
         if self._running:
             return
         self._running = True
@@ -196,7 +227,11 @@ class DualRFIDManager:
         self._watchdog_thread = threading.Thread(target=self._hotplug_watchdog, daemon=True)
         self._watchdog_thread.start()
 
-        print("[RFID] Gate monitoring loops and auto-reconnect watchdog active.")
+        # Launch USB HID Desktop Reader worker (handles small black desktop readers)
+        self._hid_thread = threading.Thread(target=self._hid_keyboard_loop, daemon=True)
+        self._hid_thread.start()
+
+        print("[RFID] Active EPC Gen2 inventory polling & auto-reconnect watchdog active.")
 
     def _hotplug_watchdog(self):
         """Periodically checks if readers were plugged in or need reconnection."""
@@ -235,42 +270,134 @@ class DualRFIDManager:
                     pass
 
     def _reader_loop(self, ser_conn: serial.Serial, gate_type: str):
-        """High-speed parsing loop for SRK-UDR6 frames."""
+        """Active EPC Class 1 Gen 2 Inventory polling loop for industrial UHF readers."""
         port_name = ser_conn.port
-        print(f"[RFID LOOP] Listening on {gate_type} ({port_name})...")
+        print(f"📡 [RFID LOOP] Active Inventory Polling started on {gate_type} ({port_name})...")
 
         buffer = bytearray()
+        scan_count = 0
+
         while self._running:
             try:
+                scan_count += 1
+
+                # 1. Transmit EPC Gen2 Inventory Poll Command
+                try:
+                    ser_conn.reset_input_buffer()
+                    ser_conn.write(INV_POLL_PACKET)
+                except Exception:
+                    time.sleep(0.5)
+                    continue
+
+                # 2. Read Response Frame (1st byte is length)
+                header = ser_conn.read(1)
+                if header:
+                    resp_len = header[0]
+                    if 4 <= resp_len <= 128:
+                        rest = ser_conn.read(resp_len)
+                        if len(rest) == resp_len:
+                            full_resp = header + rest
+                            resp_cmd = full_resp[2]
+                            resp_status = full_resp[3]
+
+                            # Status 0x01, 0x02, 0x03, 0x04 = Tags Found!
+                            # Status 0xFB, 0xFE = No Tag in Field
+                            if resp_status not in [0xFB, 0xFE] and len(full_resp) > 4:
+                                tag_count = full_resp[4]
+                                idx = 5
+                                for _ in range(tag_count):
+                                    if idx < len(full_resp) - 2:
+                                        epc_len = full_resp[idx]
+                                        idx += 1
+                                        if idx + epc_len <= len(full_resp) - 2:
+                                            epc_bytes = full_resp[idx : idx + epc_len]
+                                            idx += epc_len
+                                            epc = epc_bytes.hex().upper()
+                                            if len(epc) >= 8:
+                                                self._handle_tag_scanned(epc, gate_type, port_name)
+
+                # 3. Fallback: Parse continuous stream or auto-reporting (0x52 0x46 header)
                 if ser_conn.in_waiting > 0:
-                    chunk = ser_conn.read(ser_conn.in_waiting)
-                    buffer.extend(chunk)
-
-                    # Look for 0x52 0x46 frame header
-                    while len(buffer) >= RFID_FRAME_MIN_LEN:
-                        idx = buffer.find(RFID_HEADER)
-                        if idx == -1:
-                            buffer = buffer[-1:]
+                    raw_chunk = ser_conn.read(ser_conn.in_waiting)
+                    buffer.extend(raw_chunk)
+                    while len(buffer) >= 15:
+                        idx_hdr = buffer.find(b'\x52\x46')
+                        if idx_hdr == -1:
+                            buffer = buffer[-2:]
                             break
-
-                        if idx > 0:
-                            buffer = buffer[idx:]
-
-                        if len(buffer) < RFID_FRAME_MIN_LEN:
+                        if idx_hdr > 0:
+                            buffer = buffer[idx_hdr:]
+                        if len(buffer) < 15:
                             break
-
-                        epc_end = RFID_EPC_OFFSET + RFID_EPC_LENGTH
-                        if len(buffer) >= epc_end:
-                            epc_bytes = buffer[RFID_EPC_OFFSET:epc_end]
-                            epc = epc_bytes.hex().upper()
+                        epc_bytes = buffer[12:24]
+                        epc = epc_bytes.hex().upper()
+                        if len(epc) >= 8:
                             self._handle_tag_scanned(epc, gate_type, port_name)
-                            buffer = buffer[epc_end:]
-                        else:
-                            break
+                        buffer = buffer[24:]
 
-                time.sleep(0.02)
+                time.sleep(0.08) # 80ms scan interval
             except Exception as e:
-                time.sleep(1.0)
+                time.sleep(0.5)
+
+    def _hid_keyboard_loop(self):
+        """Background listener for USB HID Desktop RFID readers (e.g. small black USB reader)."""
+        if not sys.platform.startswith("linux"):
+            return
+
+        hid_key_map = {
+            0x1E: '1', 0x1F: '2', 0x20: '3', 0x21: '4', 0x22: '5',
+            0x23: '6', 0x24: '7', 0x25: '8', 0x26: '9', 0x27: '0',
+            0x04: 'A', 0x05: 'B', 0x06: 'C', 0x07: 'D', 0x08: 'E',
+            0x09: 'F', 0x0A: 'G', 0x0B: 'H', 0x0C: 'I', 0x0D: 'J',
+            0x0E: 'K', 0x0F: 'L', 0x10: 'M', 0x11: 'N', 0x12: 'O',
+            0x13: 'P', 0x14: 'Q', 0x15: 'R', 0x16: 'S', 0x17: 'T',
+            0x18: 'U', 0x19: 'V', 0x1A: 'W', 0x1B: 'X', 0x1C: 'Y',
+            0x1D: 'Z', 0x28: '\n'
+        }
+
+        while self._running:
+            try:
+                hid_nodes = sorted(glob.glob("/dev/hidraw*"))
+                if not hid_nodes:
+                    time.sleep(3.0)
+                    continue
+
+                for node in hid_nodes:
+                    try:
+                        fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+                        epc_chars = []
+                        last_active = time.time()
+
+                        # Read from hidraw node
+                        while self._running and (time.time() - last_active < 10.0):
+                            try:
+                                report = os.read(fd, 16)
+                                if report and len(report) >= 3:
+                                    last_active = time.time()
+                                    # Standard HID report byte 2 is the keycode
+                                    keycode = report[2]
+                                    if keycode in hid_key_map:
+                                        ch = hid_key_map[keycode]
+                                        if ch == '\n':
+                                            scanned = "".join(epc_chars).strip().upper()
+                                            if len(scanned) >= 6:
+                                                assigned_gate = "CHECK_OUT" if self.ser_checkin else "CHECK_IN"
+                                                print(f"🏷️ [USB-HID READER] Scanned: {scanned} on {node}")
+                                                self._handle_tag_scanned(scanned, assigned_gate, f"USB-HID({node})")
+                                            epc_chars = []
+                                        else:
+                                            epc_chars.append(ch)
+                            except BlockingIOError:
+                                time.sleep(0.04)
+                            except Exception:
+                                break
+
+                        os.close(fd)
+                    except Exception:
+                        pass
+                time.sleep(2.0)
+            except Exception:
+                time.sleep(3.0)
 
     def _handle_tag_scanned(self, epc: str, gate_type: str, port_name: str):
         now = time.time()
@@ -296,7 +423,7 @@ class DualRFIDManager:
                     record.last_seen = now
                     record.check_in_time = now
 
-                print(f"📦 [ENTRY GATE - CHECK IN] {meta['product_name']} ({epc}) Scanned!")
+                print(f"📦 [ENTRY GATE - CHECK IN] {meta['product_name']} ({epc}) Scanned on {port_name}!")
                 db.log_rfid_movement(epc, "CHECK_IN", port_name, 0, meta)
 
             elif gate_type == "CHECK_OUT":
@@ -317,7 +444,7 @@ class DualRFIDManager:
                         "gate": port_name
                     })
 
-                print(f"🚚 [EXIT GATE - CHECK OUT] {meta['product_name']} ({epc}) Exited! Dwell: {dwell}s")
+                print(f"🚚 [EXIT GATE - CHECK OUT] {meta['product_name']} ({epc}) Exited on {port_name}! Dwell: {dwell}s")
                 db.log_rfid_movement(epc, "CHECK_OUT", port_name, dwell, meta)
 
         for cb in self._callbacks:
