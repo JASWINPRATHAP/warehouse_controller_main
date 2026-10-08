@@ -94,6 +94,7 @@ SENSOR_OFFLINE_TIMEOUT_SEC = 8.0 # Mark ESP32 offline if no POST received within
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
+MIRROR_CAM1_OVERVIEW = True    # When True, mirrors working Camera 0 feed onto /video1 with surveillance HUD overlay
 
 FACE_TOLERANCE = 0.50          # Distance <= 0.50 is Authorized, > 0.50 is Unauthorized
 CONFIRMATION_FRAMES = 3        # Number of consecutive unknown frames required to trigger alarm

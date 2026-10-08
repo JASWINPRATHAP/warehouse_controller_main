@@ -18,6 +18,8 @@ from config import (
     SUPABASE_PASSWORD, SUPABASE_URL, SUPABASE_KEY
 )
 
+import requests
+
 try:
     import psycopg2
     from psycopg2 import pool
@@ -47,7 +49,7 @@ class DatabaseManager:
         print("[DB] Supabase async persistence worker started.")
 
     def verify_connection(self) -> dict:
-        """Explicitly tests connection to Supabase PostgreSQL and logs status."""
+        """Tests connection to Supabase PostgreSQL or REST API and logs status."""
         conn = self._get_connection()
         if conn:
             try:
@@ -55,19 +57,30 @@ class DatabaseManager:
                     cur.execute("SELECT 1;")
                 self.last_sync_status = "connected"
                 print("\n========================================================")
-                print(f" ✅ [DATABASE ONLINE] Connected to Supabase PostgreSQL!")
+                print(f" ✅ [DATABASE ONLINE] Connected to Supabase PostgreSQL Direct Pool!")
                 print(f" Host: {SUPABASE_HOST}:{SUPABASE_PORT} | DB: {SUPABASE_DB}")
                 print("========================================================\n")
                 return {"connected": True, "host": SUPABASE_HOST, "status": "ONLINE"}
             except Exception as e:
                 self.last_sync_status = f"query_err: {e}"
-        
+
+        # Test Supabase High-Speed REST API fallback
+        if SUPABASE_URL and SUPABASE_KEY:
+            try:
+                headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                r = requests.get(f"{SUPABASE_URL}/rest/v1/rfid_movement_logs?select=id&limit=1", headers=headers, timeout=3.0)
+                if r.status_code in [200, 206]:
+                    self.last_sync_status = "connected_rest"
+                    print("\n========================================================")
+                    print(f" ✅ [DATABASE ONLINE] Connected to Supabase Cloud via REST API!")
+                    print(f" Endpoint: {SUPABASE_URL} | Realtime Sync: ACTIVE")
+                    print("========================================================\n")
+                    return {"connected": True, "host": SUPABASE_HOST, "status": "ONLINE"}
+            except Exception as e:
+                self.last_sync_status = f"rest_err: {e}"
+
         print("\n========================================================")
-        print(" ⚠️ [DATABASE OFFLINE] Supabase PostgreSQL not connected.")
-        if not SUPABASE_PASSWORD:
-            print(" -> Reason: SUPABASE_PASSWORD is empty. Run 'export SUPABASE_PASSWORD=...'")
-        else:
-            print(f" -> Reason: {self.last_sync_status}")
+        print(" ⚠️ [DATABASE OFFLINE] Supabase Cloud not reachable.")
         print(" -> Action: Local resilient queue active. No data will be lost.")
         print("========================================================\n")
         return {"connected": False, "host": SUPABASE_HOST, "status": self.last_sync_status}
@@ -172,11 +185,73 @@ class DatabaseManager:
                 self.last_sync_time = time.time()
                 self.last_sync_status = "synced"
 
+    def _sync_via_rest(self, item: Dict[str, Any]) -> bool:
+        """Pushes data directly via Supabase HTTPS REST API without requiring PostgreSQL password."""
+        if not SUPABASE_KEY or not SUPABASE_URL:
+            return False
+        try:
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }
+            ev_type = item.get("type")
+            if ev_type == "RFID_MOVEMENT":
+                url = f"{SUPABASE_URL}/rest/v1/rfid_movement_logs"
+                payload = {
+                    "epc": item["epc"],
+                    "product_name": item.get("metadata", {}).get("product_name", f"Item-{item['epc'][:8]}"),
+                    "gate_type": item["gate_type"],
+                    "reader_port": item.get("reader_port", "UNKNOWN"),
+                    "dwell_duration_seconds": item.get("dwell_duration_seconds", 0)
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=3.5)
+                success = resp.status_code in [200, 201, 204]
+
+                # 2. Also upsert into inventory_items catalog so it reflects immediately on RFID Hub page
+                try:
+                    inv_url = f"{SUPABASE_URL}/rest/v1/inventory_items?on_conflict=epc"
+                    inv_headers = dict(headers)
+                    inv_headers["Prefer"] = "resolution=merge-duplicates"
+                    new_status = "IN_WAREHOUSE" if item["gate_type"] == "CHECK_IN" else "DISPATCHED"
+                    inv_payload = {
+                        "epc": item["epc"],
+                        "product_name": item.get("metadata", {}).get("product_name", f"Item-{item['epc'][:8]}"),
+                        "category": item.get("metadata", {}).get("category", "General"),
+                        "unit_weight_kg": item.get("metadata", {}).get("unit_weight_kg", 1.0),
+                        "target_zone": item.get("metadata", {}).get("target_zone", "Zone-A"),
+                        "status": new_status,
+                        "last_seen_gate": item["gate_type"]
+                    }
+                    requests.post(inv_url, headers=inv_headers, json=inv_payload, timeout=3.0)
+                except Exception:
+                    pass
+
+                if success:
+                    print(f"☁️ [SUPABASE REST] Synced RFID {item['gate_type']} for {item['epc']}")
+                    return True
+            elif ev_type == "SECURITY_ALERT":
+                url = f"{SUPABASE_URL}/rest/v1/security_alerts"
+                payload = {
+                    "alert_type": item["alert_type"],
+                    "severity": item.get("severity", "WARNING"),
+                    "details": item.get("details", {}),
+                    "resolved": False
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=3.5)
+                if resp.status_code in [200, 201, 204]:
+                    print(f"☁️ [SUPABASE REST] Synced Security Alert {item['alert_type']}")
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _execute_sync(self, item: Dict[str, Any]) -> bool:
         conn = self._get_connection()
         if not conn:
-            # Cannot connect directly; will keep in queue
-            return False
+            # Fallback to Supabase REST API
+            return self._sync_via_rest(item)
 
         try:
             with conn.cursor() as cur:

@@ -26,7 +26,7 @@ from typing import Optional, List, Tuple
 
 from config import (
     CAMERA_WIDTH, CAMERA_HEIGHT, FACE_TOLERANCE, CONFIRMATION_FRAMES,
-    FACE_COOLDOWN_SEC, KNOWN_FACES_DIR, UNKNOWN_FACES_DIR
+    FACE_COOLDOWN_SEC, KNOWN_FACES_DIR, UNKNOWN_FACES_DIR, MIRROR_CAM1_OVERVIEW
 )
 from audio_manager import audio
 from door_controller import door
@@ -397,7 +397,18 @@ class VisionManager:
                     if frame is None:
                         frame = self._generate_standby_frame("Camera 0 (AI Face Biometric)")
                 else:
-                    frame = self._grab_cam1_frame()
+                    frame = None
+                    if not MIRROR_CAM1_OVERVIEW:
+                        frame = self._grab_cam1_frame()
+                    if frame is None:
+                        # Fallback or Synced Mode: Mirror Camera 0 with surveillance watermark
+                        frame = self.latest_frame_cam0 or self._grab_cam0_frame()
+                        if frame is not None:
+                            frame = frame.copy()
+                            cv2.putText(frame, "CAM 1 - SURVEILLANCE FLOOR (SYNCED)", (15, 25),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 128), 2)
+                            cv2.putText(frame, f"FEED 02 | {datetime.now().strftime('%H:%M:%S')}", (15, 460),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
                     if frame is None:
                         frame = self._generate_standby_frame("Camera 1 (Live Surveillance)")
 

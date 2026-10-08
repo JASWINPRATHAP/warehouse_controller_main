@@ -197,9 +197,9 @@ class DualRFIDManager:
                     bytesize=serial.EIGHTBITS,
                     parity=serial.PARITY_NONE,
                     stopbits=serial.STOPBITS_ONE,
-                    timeout=0.15
+                    timeout=0.6  # Essential for industrial UHF readers: RF query cycle takes 150-400ms
                 )
-                print(f"✅ [RFID CONNECTED] {label} online on '{port_name}' @ {baud} baud.")
+                print(f"✅ [RFID CONNECTED] {label} online on '{port_name}' @ {baud} baud (timeout=0.6s).")
                 return ser
             except Exception as e:
                 pass
@@ -274,22 +274,28 @@ class DualRFIDManager:
         port_name = ser_conn.port
         print(f"📡 [RFID LOOP] Active Inventory Polling started on {gate_type} ({port_name})...")
 
-        buffer = bytearray()
+        # Standard Inventory command packets: Addr 0x00 and Broadcast Addr 0xFF
+        pkt_addr0 = bytes([0x04, 0x00, 0x01, 0xDB, 0x4B])
+        pkt_bcast = bytes([0x04, 0xFF, 0x01, 0x32, 0x0B])
+
+        stream_buffer = bytearray()
         scan_count = 0
 
         while self._running:
             try:
                 scan_count += 1
+                inv_pkt = pkt_addr0 if (scan_count % 2 == 1) else pkt_bcast
 
-                # 1. Transmit EPC Gen2 Inventory Poll Command
+                # Only clear buffer if excessive stale bytes have accumulated (> 512 bytes)
                 try:
-                    ser_conn.reset_input_buffer()
-                    ser_conn.write(INV_POLL_PACKET)
-                except Exception:
+                    if ser_conn.in_waiting > 512:
+                        ser_conn.reset_input_buffer()
+                    ser_conn.write(inv_pkt)
+                except Exception as write_err:
                     time.sleep(0.5)
                     continue
 
-                # 2. Read Response Frame (1st byte is length)
+                # Read Response Frame: 1st byte is length of remainder of frame
                 header = ser_conn.read(1)
                 if header:
                     resp_len = header[0]
@@ -304,8 +310,9 @@ class DualRFIDManager:
                             # Status 0xFB, 0xFE = No Tag in Field
                             if resp_status not in [0xFB, 0xFE] and len(full_resp) > 4:
                                 tag_count = full_resp[4]
+                                print(f"\n🏷️ [RFID DETECTED] {gate_type} ({port_name}) | Status: 0x{resp_status:02X} | CardNum: {tag_count}")
                                 idx = 5
-                                for _ in range(tag_count):
+                                for t_idx in range(tag_count):
                                     if idx < len(full_resp) - 2:
                                         epc_len = full_resp[idx]
                                         idx += 1
@@ -314,28 +321,46 @@ class DualRFIDManager:
                                             idx += epc_len
                                             epc = epc_bytes.hex().upper()
                                             if len(epc) >= 8:
+                                                print(f"   -> EPC #{t_idx+1}: {epc} ({len(epc_bytes)} bytes)")
                                                 self._handle_tag_scanned(epc, gate_type, port_name)
 
-                # 3. Fallback: Parse continuous stream or auto-reporting (0x52 0x46 header)
+                # Secondary parsing: Continuous stream or ASCII keyboard / barcode stream
                 if ser_conn.in_waiting > 0:
                     raw_chunk = ser_conn.read(ser_conn.in_waiting)
-                    buffer.extend(raw_chunk)
-                    while len(buffer) >= 15:
-                        idx_hdr = buffer.find(b'\x52\x46')
+                    stream_buffer.extend(raw_chunk)
+
+                    # Check for ASCII formatted lines (e.g. from USB virtual serial barcode/RFID readers)
+                    try:
+                        text_chunk = stream_buffer.decode('ascii', errors='ignore')
+                        if '\n' in text_chunk or '\r' in text_chunk:
+                            lines = text_chunk.replace('\r', '\n').split('\n')
+                            for line in lines[:-1]:
+                                cleaned = line.strip().upper()
+                                if len(cleaned) >= 8 and all(c in "0123456789ABCDEF" for c in cleaned):
+                                    print(f"🏷️ [RFID ASCII DETECTED] {gate_type} ({port_name}) -> EPC: {cleaned}")
+                                    self._handle_tag_scanned(cleaned, gate_type, port_name)
+                            stream_buffer = bytearray(lines[-1].encode('ascii', errors='ignore'))
+                    except Exception:
+                        pass
+
+                    # Check for 0x52 0x46 packet format
+                    while len(stream_buffer) >= 15:
+                        idx_hdr = stream_buffer.find(b'\x52\x46')
                         if idx_hdr == -1:
-                            buffer = buffer[-2:]
+                            stream_buffer = stream_buffer[-4:]
                             break
                         if idx_hdr > 0:
-                            buffer = buffer[idx_hdr:]
-                        if len(buffer) < 15:
+                            stream_buffer = stream_buffer[idx_hdr:]
+                        if len(stream_buffer) < 15:
                             break
-                        epc_bytes = buffer[12:24]
+                        epc_bytes = stream_buffer[12:24]
                         epc = epc_bytes.hex().upper()
                         if len(epc) >= 8:
+                            print(f"🏷️ [RFID CONTINUOUS DETECTED] {gate_type} ({port_name}) -> EPC: {epc}")
                             self._handle_tag_scanned(epc, gate_type, port_name)
-                        buffer = buffer[24:]
+                        stream_buffer = stream_buffer[24:]
 
-                time.sleep(0.08) # 80ms scan interval
+                time.sleep(0.05)
             except Exception as e:
                 time.sleep(0.5)
 
