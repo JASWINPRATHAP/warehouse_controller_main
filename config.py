@@ -117,41 +117,140 @@ RFID_DEBOUNCE_SEC = 2.0 # Minimum seconds between scans of the same tag at the s
 
 # 📦 Warehouse Predefined Tag Catalog (Hex EPC -> Product Details)
 PREDEFINED_TAG_CATALOG = {
-    "E28011700000020A12345601": {
-        "product_name": "Industrial Gearbox Pallet",
+    "E2801191A504007870E42DDB": {
+        "product_name": "Heavy Industrial Gearbox Pallet",
         "category": "Machinery",
-        "unit_weight_kg": 25.5,
+        "unit_weight_kg": 28.5,
         "target_zone": "Zone-A",
-        "mfg_date": "2026-01-10",
-        "exp_date": "2030-01-10",
-        "batch_no": "GB-BATCH-01"
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "GB-BATCH-101"
     },
-    "E28011700000020A12345602": {
-        "product_name": "Precision Roller Bearings Box",
+    "E2801191A504007870E3E8EB": {
+        "product_name": "High-Precision Roller Bearings Box",
         "category": "Hardware",
-        "unit_weight_kg": 12.0,
+        "unit_weight_kg": 14.2,
         "target_zone": "Zone-B",
-        "mfg_date": "2026-02-15",
-        "exp_date": "2029-02-15",
-        "batch_no": "RB-BATCH-02"
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "RB-BATCH-102"
     },
-    "E28011700000020A12345603": {
-        "product_name": "Heavy Duty Copper Wire Coil",
+    "E2801191A504007870E3E8FB": {
+        "product_name": "Pure Copper Motor Winding Coil",
         "category": "Electrical",
-        "unit_weight_kg": 18.2,
-        "target_zone": "Zone-C",
-        "mfg_date": "2026-03-01",
-        "exp_date": "2031-03-01",
-        "batch_no": "CW-BATCH-03"
+        "unit_weight_kg": 19.8,
+        "target_zone": "Zone-A",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "CW-BATCH-103"
     },
-    "E28011700000020A12345604": {
-        "product_name": "Microcontroller Circuit Boards",
+    "E20001020304050607080912": {
+        "product_name": "STM32 Industrial Controller PCBs",
         "category": "Electronics",
-        "unit_weight_kg": 6.4,
+        "unit_weight_kg": 5.6,
+        "target_zone": "Zone-C",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "PCB-BATCH-104"
+    },
+    "E2801191A504007870E42D1B": {
+        "product_name": "Hydraulic High-Pressure Seal Rings",
+        "category": "Hydraulics",
+        "unit_weight_kg": 4.2,
+        "target_zone": "Zone-B",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "HS-BATCH-105"
+    },
+    "E2801191A504007870E42D2B": {
+        "product_name": "Digital Clamp Multimeter Kit",
+        "category": "Instrumentation",
+        "unit_weight_kg": 2.1,
+        "target_zone": "Zone-C",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "MM-BATCH-106"
+    },
+    "E2000102030C050607080917": {
+        "product_name": "CNC Tungsten Carbide End Mills Pack",
+        "category": "Tooling",
+        "unit_weight_kg": 6.8,
         "target_zone": "Zone-D",
-        "mfg_date": "2026-04-12",
-        "exp_date": "2028-04-12",
-        "batch_no": "MC-BATCH-04"
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "EM-BATCH-107"
+    },
+    "E2801191A504007870E42D4B": {
+        "product_name": "Three-Phase Induction Motor 5HP",
+        "category": "Machinery",
+        "unit_weight_kg": 38.0,
+        "target_zone": "Zone-A",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "MT-BATCH-108"
+    },
+    "E2801191A504007870E42DBB": {
+        "product_name": "Industrial Pneumatic Solenoid Valves",
+        "category": "Pneumatics",
+        "unit_weight_kg": 7.5,
+        "target_zone": "Zone-B",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "SV-BATCH-109"
+    },
+    "E2801191A504007870E42D6B": {
+        "product_name": "Automated Optical Sensor Modules",
+        "category": "Electronics",
+        "unit_weight_kg": 3.4,
+        "target_zone": "Zone-C",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "OS-BATCH-110"
+    },
+    "E2801191A504007870E42D7B": {
+        "product_name": "Stainless Steel Flange Set DN50",
+        "category": "Hardware",
+        "unit_weight_kg": 16.5,
+        "target_zone": "Zone-D",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "FL-BATCH-111"
+    },
+    "E2801191A504007870E42D8B": {
+        "product_name": "Thermal Imaging Safety Sensor",
+        "category": "Safety Equipment",
+        "unit_weight_kg": 2.8,
+        "target_zone": "Zone-C",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "TI-BATCH-112"
+    },
+    "E2801191A504007870E42D9B": {
+        "product_name": "High-Torque Stepper Motor NEMA 34",
+        "category": "Electrical",
+        "unit_weight_kg": 9.2,
+        "target_zone": "Zone-A",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "SM-BATCH-113"
+    },
+    "E2801191A504007870E3E8DB": {
+        "product_name": "Chemical Storage Anti-Corrosive Drum",
+        "category": "Chemicals",
+        "unit_weight_kg": 45.0,
+        "target_zone": "Zone-D",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "CD-BATCH-114"
+    },
+    "E2801191A504007870E42DAB": {
+        "product_name": "Variable Frequency Drive Inverter 7.5kW",
+        "category": "Electrical",
+        "unit_weight_kg": 11.4,
+        "target_zone": "Zone-B",
+        "mfg_date": "2026-01-15",
+        "exp_date": "2030-01-15",
+        "batch_no": "VFD-BATCH-115"
     }
 }
 
@@ -184,7 +283,7 @@ SUPABASE_DB = os.environ.get("SUPABASE_DB", "postgres")
 SUPABASE_USER = os.environ.get("SUPABASE_USER", "postgres.faptrwqvcnozbajbihih")
 SUPABASE_PASSWORD = os.environ.get("SUPABASE_PASSWORD", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://faptrwqvcnozbajbihih.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZhcHRyd3F2Y25vemJhamJpaGloIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxODE0MzUsImV4cCI6MjEwNDc1NzQzNX0.0je94XVltdzs5kniPaGGw5b7Y5FmyDoDgLSlyy4JtGE")
 
 RFID_INVENTORY_DB_FILE = os.path.join(os.path.dirname(__file__), "warehouse_inventory.json")
 EVENTS_LOG_FILE = os.path.join(os.path.dirname(__file__), "events.jsonl")
